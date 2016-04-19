@@ -34,11 +34,11 @@ func init() {
 }
 
 func main() {
-	myApp := cli.NewApp()
-	myApp.Name = "kcptun"
-	myApp.Usage = "kcptun client"
-	myApp.Version = "1.0"
-	myApp.Flags = []cli.Flag{
+	cliApp := cli.NewApp()
+	cliApp.Name = "finaltun"
+	cliApp.Usage = "finaltun client"
+	cliApp.Version = "1.0"
+	cliApp.Flags = []cli.Flag{
 		cli.StringFlag{
 			Name:  "localaddr,l",
 			Value: ":12948",
@@ -46,16 +46,16 @@ func main() {
 		},
 		cli.StringFlag{
 			Name:  "remoteaddr, r",
-			Value: "vps:29900",
-			Usage: "kcp server addr",
+			Value: "127.0.0.1:29900",
+			Usage: "finaltun server addr",
 		},
 		cli.StringFlag{
 			Name:  "key",
 			Value: "it's a secrect",
-			Usage: "key for communcation, must be the same as kcptun server",
+			Usage: "key for communcation, must be the same as finaltun server",
 		},
 	}
-	myApp.Action = func(c *cli.Context) {
+	cliApp.Action = func(c *cli.Context) {
 		addr, err := net.ResolveTCPAddr("tcp", c.String("localaddr"))
 		checkError(err)
 		listener, err := net.ListenTCP("tcp", addr)
@@ -70,7 +70,7 @@ func main() {
 			go handleClient(conn, c.String("remoteaddr"), c.String("key"))
 		}
 	}
-	myApp.Run(os.Args)
+	cliApp.Run(os.Args)
 }
 
 func peer(sess_die chan struct{}, remote string, key string) (net.Conn, <-chan []byte) {

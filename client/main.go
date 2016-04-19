@@ -40,6 +40,11 @@ func main() {
 	cliApp.Version = "1.0"
 	cliApp.Flags = []cli.Flag{
 		cli.StringFlag{
+			Name:  "mode,m",
+			Value: "kcp",
+			Usage: "transportation mode",
+		},
+		cli.StringFlag{
 			Name:  "localaddr,l",
 			Value: ":12948",
 			Usage: "local listen addr:",
@@ -67,13 +72,70 @@ func main() {
 				log.Println("accept failed:", err)
 				continue
 			}
-			go handleClient(conn, c.String("remoteaddr"), c.String("key"))
+			go handleClient(conn, c.String("remoteaddr"), c.String("key"), c.String("mode"))
 		}
 	}
 	cliApp.Run(os.Args)
 }
 
-func peer(sess_die chan struct{}, remote string, key string) (net.Conn, <-chan []byte) {
+func peer(sess_die chan struct{}, remote string, key string, mode string) (net.Conn, <-chan []byte) {
+	switch mode {
+	case "kcp":
+		return kcpPeer(sess_die, remote, key)
+	case "tcp":
+		return tcpPeer(sess_die, remote, key)
+	default:
+		panic("mode not support")
+	}
+}
+
+func tcpPeer(sess_die chan struct{}, remote string, key string) (net.Conn, <-chan []byte) {
+	conn, err := net.Dial("tcp", remote)
+	if err != nil {
+		log.Println(err)
+		return nil, nil
+	}
+	ch := make(chan []byte, 1024)
+
+	go func() {
+		defer func() {
+			close(ch)
+		}()
+
+		//decoder
+		commkey := make([]byte, 32)
+		copy(commkey, []byte(key))
+		block, err := aes.NewCipher(commkey)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		decoder := cipher.NewCTR(block, iv)
+
+		for {
+			conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
+			bts := <-ch_buf
+			if n, err := conn.Read(bts); err == nil {
+				bts = bts[:n]
+				decoder.XORKeyStream(bts, bts)
+			} else if err, ok := err.(*net.OpError); ok && err.Timeout() {
+				continue
+			} else {
+				log.Println(err)
+				return
+			}
+
+			select {
+			case ch <- bts:
+			case <-sess_die:
+				return
+			}
+		}
+	}()
+	return conn, ch
+}
+
+func kcpPeer(sess_die chan struct{}, remote string, key string) (net.Conn, <-chan []byte) {
 	conn, err := kcp.DialEncrypted(kcp.MODE_FAST, remote, key)
 	if err != nil {
 		log.Println(err)
@@ -156,7 +218,7 @@ func client(conn net.Conn, sess_die chan struct{}, key string) <-chan []byte {
 	return ch
 }
 
-func handleClient(conn *net.TCPConn, remote string, key string) {
+func handleClient(conn *net.TCPConn, remote string, key string, mode string) {
 	log.Println("stream opened")
 	defer log.Println("stream closed")
 	sess_die := make(chan struct{})
@@ -165,7 +227,7 @@ func handleClient(conn *net.TCPConn, remote string, key string) {
 		conn.Close()
 	}()
 
-	conn_peer, ch_peer := peer(sess_die, remote, key)
+	conn_peer, ch_peer := peer(sess_die, remote, key, mode)
 	ch_client := client(conn, sess_die, key)
 	if conn_peer == nil {
 		return

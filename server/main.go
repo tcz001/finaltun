@@ -33,15 +33,20 @@ func init() {
 }
 
 func main() {
-	myApp := cli.NewApp()
-	myApp.Name = "kcptun"
-	myApp.Usage = "kcptun server"
-	myApp.Version = "1.0"
-	myApp.Flags = []cli.Flag{
+	serverApp := cli.NewApp()
+	serverApp.Name = "finaltun"
+	serverApp.Usage = "finaltun server"
+	serverApp.Version = "1.0"
+	serverApp.Flags = []cli.Flag{
+		cli.StringFlag{
+			Name:  "mode,m",
+			Value: "kcp",
+			Usage: "transportation mode",
+		},
 		cli.StringFlag{
 			Name:  "listen,l",
 			Value: ":29900",
-			Usage: "kcp server listen addr:",
+			Usage: "finaltun server listen addr:",
 		},
 		cli.StringFlag{
 			Name:  "target, t",
@@ -51,26 +56,46 @@ func main() {
 		cli.StringFlag{
 			Name:  "key",
 			Value: "it's a secrect",
-			Usage: "key for communcation, must be the same as kcptun client",
+			Usage: "key for communcation, must be the same as finaltun client",
 		},
 	}
-	myApp.Action = func(c *cli.Context) {
-		lis, err := kcp.ListenEncrypted(kcp.MODE_FAST, c.String("listen"), c.String("key"))
-		if err != nil {
-			log.Fatal(err)
+	serverApp.Action = func(c *cli.Context) {
+		switch c.String("mode") {
+		case "kcp":
+			lis, err := kcp.ListenEncrypted(kcp.MODE_FAST, c.String("listen"), c.String("key"))
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Println("listening on ", lis.Addr())
+			for {
+				if conn, err := lis.Accept(); err == nil {
+					conn.SetWindowSize(1024, 128)
+					go handleClient(conn, c.String("target"), c.String("key"))
+				} else {
+					log.Println(err)
+				}
+			}
+			break
+		case "tcp":
+			lis, err := net.Listen("tcp", c.String("listen"))
+			if err != nil {
+				log.Fatal(err)
+			}
+			log.Println("listening on ", lis.Addr())
+			for {
+				if conn, err := lis.Accept(); err == nil {
+					go handleClient(conn, c.String("target"), c.String("key"))
+				} else {
+					log.Println(err)
+				}
+			}
+			break
+		default:
+			panic("mode not support")
 		}
 
-		log.Println("listening on ", lis.Addr())
-		for {
-			if conn, err := lis.Accept(); err == nil {
-				conn.SetWindowSize(1024, 128)
-				go handleClient(conn, c.String("target"), c.String("key"))
-			} else {
-				log.Println(err)
-			}
-		}
 	}
-	myApp.Run(os.Args)
+	serverApp.Run(os.Args)
 }
 
 func peer(conn net.Conn, sess_die chan struct{}, key string) chan []byte {
@@ -165,7 +190,6 @@ func handleClient(conn net.Conn, target string, key string) {
 		conn.Close()
 	}()
 
-	////
 	ch_peer := peer(conn, sess_die, key)
 	conn_ep, ch_ep := endpoint(sess_die, target, key)
 	if conn_ep == nil {

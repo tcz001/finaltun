@@ -9,8 +9,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/codegangsta/cli"
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 	"github.com/xtaci/kcp-go"
+
+	"github.com/codegangsta/cli"
 )
 
 const (
@@ -19,11 +22,13 @@ const (
 
 var (
 	ch_buf chan []byte
+	ch_tun chan gopacket.Packet
 	iv     []byte = []byte{147, 243, 201, 109, 83, 207, 190, 153, 204, 106, 86, 122, 71, 135, 200, 20}
 )
 
 func init() {
 	ch_buf = make(chan []byte, 1024)
+	ch_tun = make(chan gopacket.Packet, 1024)
 	go func() {
 		for {
 			ch_buf <- make([]byte, BUFSIZ)
@@ -41,13 +46,18 @@ func main() {
 	cliApp.Flags = []cli.Flag{
 		cli.StringFlag{
 			Name:  "mode,m",
-			Value: "kcp",
-			Usage: "transportation mode",
+			Value: "tcp",
+			Usage: "transportation mode can be tcp/kcp/fs",
 		},
 		cli.StringFlag{
-			Name:  "localaddr,l",
-			Value: ":12948",
-			Usage: "local listen addr:",
+			Name:  "device,d",
+			Value: "lo0",
+			Usage: "device ethernet:",
+		},
+		cli.StringFlag{
+			Name:  "port,p",
+			Value: "12948",
+			Usage: "local listen port:",
 		},
 		cli.StringFlag{
 			Name:  "remoteaddr, r",
@@ -61,7 +71,7 @@ func main() {
 		},
 	}
 	cliApp.Action = func(c *cli.Context) {
-		addr, err := net.ResolveTCPAddr("tcp", c.String("localaddr"))
+		addr, err := net.ResolveTCPAddr("tcp", ":"+c.String("port"))
 		checkError(err)
 		listener, err := net.ListenTCP("tcp", addr)
 		checkError(err)
@@ -72,18 +82,20 @@ func main() {
 				log.Println("accept failed:", err)
 				continue
 			}
-			go handleClient(conn, c.String("remoteaddr"), c.String("key"), c.String("mode"))
+			go handleClient(conn, c)
 		}
 	}
 	cliApp.Run(os.Args)
 }
 
-func peer(sess_die chan struct{}, remote string, key string, mode string) (net.Conn, <-chan []byte) {
-	switch mode {
-	case "kcp":
-		return kcpPeer(sess_die, remote, key)
+func peer(sess_die chan struct{}, c *cli.Context) (net.Conn, <-chan []byte) {
+	switch c.String("mode") {
 	case "tcp":
-		return tcpPeer(sess_die, remote, key)
+		return tcpPeer(sess_die, c.String("remoteaddr"), c.String("key"))
+	case "kcp":
+		return kcpPeer(sess_die, c.String("remoteaddr"), c.String("key"))
+	case "fs":
+		return fsPeer(sess_die, c.String("remoteaddr"), c.String("key"), c.String("device"), c.String("port"))
 	default:
 		panic("mode not support")
 	}
@@ -138,7 +150,7 @@ func tcpPeer(sess_die chan struct{}, remote string, key string) (net.Conn, <-cha
 func kcpPeer(sess_die chan struct{}, remote string, key string) (net.Conn, <-chan []byte) {
 	conn, err := kcp.DialEncrypted(kcp.MODE_FAST, remote, key)
 	if err != nil {
-		log.Println(err)
+		log.Fatal(err)
 		return nil, nil
 	}
 	ch := make(chan []byte, 1024)
@@ -182,7 +194,86 @@ func kcpPeer(sess_die chan struct{}, remote string, key string) (net.Conn, <-cha
 	return conn, ch
 }
 
-func client(conn net.Conn, sess_die chan struct{}, key string) <-chan []byte {
+func fsPeer(sess_die chan struct{}, remote string, key string, device string, port string) (net.Conn, <-chan []byte) {
+	// TODO: conn := FSConn{}
+	conn, err := net.Dial("tcp", remote)
+	if err != nil {
+		log.Fatal(err)
+		return nil, nil
+	}
+	ch := make(chan []byte, 1024)
+	go func() {
+		defer func() {
+			close(ch)
+		}()
+		//decoder
+		commkey := make([]byte, 32)
+		copy(commkey, []byte(key))
+		block, err := aes.NewCipher(commkey)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		decoder := cipher.NewCTR(block, iv)
+
+		for {
+			conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
+			bts := <-ch_buf
+			if n, err := conn.Read(bts); err == nil {
+				bts = bts[:n]
+				decoder.XORKeyStream(bts, bts)
+			} else if err, ok := err.(*net.OpError); ok && err.Timeout() {
+				continue
+			} else {
+				log.Println(err)
+				return
+			}
+
+			packet := gopacket.NewPacket(bts, layers.LayerTypeTCP, gopacket.Default)
+			resend := handlePacket(packet)
+
+			select {
+			case ch <- bts:
+				if resend {
+					// TODO: btc.serialNumber++
+					// ch <- bts
+				}
+			case <-sess_die:
+				return
+			}
+		}
+	}()
+	return conn, ch
+}
+
+type FSConn struct{}
+
+func (FSConn) Read(b []byte) (n int, err error) {
+	return 0, nil
+}
+func (FSConn) Write(b []byte) (n int, err error) {
+	return 0, nil
+}
+func (FSConn) Close() error {
+	return nil
+}
+func (FSConn) LocalAddr() net.Addr {
+	return nil
+}
+func (FSConn) RemoteAddr() net.Addr {
+	return nil
+}
+func (FSConn) SetDeadline(t time.Time) error {
+	return nil
+}
+func (FSConn) SetReadDeadline(t time.Time) error {
+	return nil
+}
+func (FSConn) SetWriteDeadline(t time.Time) error {
+	return nil
+}
+
+func client(conn net.Conn, sess_die chan struct{}, c *cli.Context) <-chan []byte {
 	ch := make(chan []byte, 1024)
 	go func() {
 		defer func() {
@@ -191,7 +282,7 @@ func client(conn net.Conn, sess_die chan struct{}, key string) <-chan []byte {
 
 		// encoder
 		commkey := make([]byte, 32)
-		copy(commkey, []byte(key))
+		copy(commkey, []byte(c.String("key")))
 		block, err := aes.NewCipher(commkey)
 		if err != nil {
 			log.Println(err)
@@ -207,9 +298,17 @@ func client(conn net.Conn, sess_die chan struct{}, key string) <-chan []byte {
 				return
 			}
 			bts = bts[:n]
+
+			packet := gopacket.NewPacket(bts, layers.LayerTypeTCP, gopacket.Default)
+			resend := handlePacket(packet) && (c.String("mode") == "fs")
+
 			encoder.XORKeyStream(bts, bts)
 			select {
 			case ch <- bts:
+				if resend {
+					// TODO: btc.serialNumber++
+					// ch <- bts
+				}
 			case <-sess_die:
 				return
 			}
@@ -218,7 +317,7 @@ func client(conn net.Conn, sess_die chan struct{}, key string) <-chan []byte {
 	return ch
 }
 
-func handleClient(conn *net.TCPConn, remote string, key string, mode string) {
+func handleClient(conn *net.TCPConn, c *cli.Context) {
 	log.Println("stream opened")
 	defer log.Println("stream closed")
 	sess_die := make(chan struct{})
@@ -227,8 +326,8 @@ func handleClient(conn *net.TCPConn, remote string, key string, mode string) {
 		conn.Close()
 	}()
 
-	conn_peer, ch_peer := peer(sess_die, remote, key, mode)
-	ch_client := client(conn, sess_die, key)
+	conn_peer, ch_peer := peer(sess_die, c)
+	ch_client := client(conn, sess_die, c)
 	if conn_peer == nil {
 		return
 	}
@@ -261,4 +360,32 @@ func checkError(err error) {
 		log.Println(err)
 		os.Exit(-1)
 	}
+}
+
+func handlePacket(packet gopacket.Packet) bool {
+	mac, ok := packet.LinkLayer().(*layers.Ethernet)
+	if ok {
+		log.Println("Ethernet", mac.LinkFlow())
+	}
+	ip, ok := packet.NetworkLayer().(*layers.IPv4)
+	if ok {
+		log.Println("IPv4", ip.NetworkFlow())
+	}
+	tcp, ok := packet.TransportLayer().(*layers.TCP)
+	if ok {
+		if tcp.SYN && !tcp.ACK {
+			log.Println("Sent NO1 handshake: ")
+			return true
+		}
+		if tcp.SYN && tcp.ACK {
+			log.Println("Receive NO2 handshake: ")
+		}
+		if !tcp.SYN && tcp.ACK && len(tcp.LayerPayload()) != 0 {
+			return true
+			log.Println("Sent NO3 handshake: ")
+			log.Println("data", len(tcp.LayerPayload()))
+		}
+		log.Println("TCP", tcp.TransportFlow())
+	}
+	return false
 }

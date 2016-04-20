@@ -1,3 +1,5 @@
+> Still in active development, don't use it for now
+
 # FinalTun
 Inspired by KCPTun and FinalSpeed
 
@@ -33,5 +35,3 @@ Inspired by KCPTun and FinalSpeed
 `client -r "xxx.xxx.xxx.xxx:29900" -m tcp/kcp`    // 连接到finaltun server，默认finaltun server端口是29900
 
 5. 浏览器就可以连接12948端口进行socks5代理访问了。   // 默认finaltun client的端口是12948
-
-```注意：这个例子是为了让你快速上手，正确的姿势应该是是在客户端开启ssh -D，详见 使用案例```

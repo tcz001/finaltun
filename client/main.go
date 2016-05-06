@@ -148,7 +148,7 @@ func tcpPeer(sess_die chan struct{}, remote string, key string) (net.Conn, <-cha
 }
 
 func kcpPeer(sess_die chan struct{}, remote string, key string) (net.Conn, <-chan []byte) {
-	conn, err := kcp.DialEncrypted(kcp.MODE_FAST, remote, key)
+	conn, err := kcp.DialEncrypted(kcp.MODE_FAST, remote, []byte(key))
 	if err != nil {
 		log.Fatal(err)
 		return nil, nil
